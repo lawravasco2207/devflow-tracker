@@ -1,0 +1,19 @@
+
+<!DOCTYPE html>
+<html>
+<head>
+    <title>DevFlow AI - PR Review</title>
+</head>
+<body>
+    <h2>PR Review Summarizer</h2>
+    <form method="post">
+        <textarea name="diff" rows="20" cols="100" placeholder="Paste your PR diff here..."></textarea><br>
+        <button type="submit">Generate Summary</button>
+    </form>
+
+    {% if response %}
+    <h3>AI Review Output</h3>
+    <pre>{{ response }}</pre>
+    {% endif %}
+</body>
+</html>
