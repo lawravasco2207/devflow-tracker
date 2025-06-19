@@ -1,0 +1,59 @@
+{
+  "name": "devflow-ai",
+  "displayName": "DevFlow AI",
+  "description": "AI-powered PR reviewer using Gemini + GitHub integration",
+  "version": "1.0.0",
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "main": "./out/extension.js",
+  "activationEvents": [
+    "onStartupFinished",
+    "onCommand:extension.devflowReview"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "extension.devflowReview",
+        "title": "DevFlow: Review Current File with AI",
+        "category": "DevFlow"
+      }
+    ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "extension.devflowReview",
+          "group": "navigation",
+          "when": "editorTextFocus"
+        }
+      ],
+      "view/title": [
+        {
+          "command": "extension.devflowReview",
+          "group": "navigation",
+          "when": "explorerViewletVisible"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p .",
+    "watch": "tsc -watch -p .",
+    "pretest": "npm run compile && npm run lint",
+    "lint": "eslint src --ext ts",
+    "test": "node ./out/test/runTest.js"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.80.0",
+    "@typescript-eslint/eslint-plugin": "^6.0.0",
+    "@typescript-eslint/parser": "^6.0.0",
+    "eslint": "^8.0.0",
+    "typescript": "^5.0.0"
+  },
+  "dependencies": {
+    "node-fetch": "^3.3.2",
+    "simple-git": "^3.28.0"
+  }
+}
