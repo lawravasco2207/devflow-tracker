@@ -4,11 +4,12 @@ import * as fs from 'fs';
 import * as cp from 'child_process';
 import simpleGit from 'simple-git';
 import fetch from 'node-fetch';
+import { getSidebarWebviewContent } from './panel';
 
 let statusBarItem: vscode.StatusBarItem;
 let gitStatus: { behind: number; ahead: number; files: string[] } | null = null;
 let extensionContext: vscode.ExtensionContext;
-
+ 
 function findGitRoot(currentPath: string): string | null {
   let folder = currentPath;
   while (folder !== path.dirname(folder)) {
@@ -22,7 +23,7 @@ async function updateGitStatus(gitRoot: string) {
   const git = simpleGit(gitRoot);
   try {
     const status = await git.status();
-    gitStatus = {
+    gitStatus = { 
       behind: status.behind,
       ahead: status.ahead,
       files: status.files.map(f => f.path)
@@ -40,7 +41,7 @@ function updateStatusBarItem() {
       vscode.StatusBarAlignment.Left,
       100
     );
-    statusBarItem.command = 'extension.devflowReview';
+    statusBarItem.command = 'devflow.openChatSidebar';
     extensionContext.subscriptions.push(statusBarItem);
   }
 
@@ -56,7 +57,7 @@ function updateStatusBarItem() {
       text += ` $(pencil)${gitStatus.files.length}`;
     }
     statusBarItem.text = text;
-    statusBarItem.tooltip = 'Click to review with DevFlow AI';
+    statusBarItem.tooltip = 'Open DevFlow AI Chat Sidebar';
     statusBarItem.show();
   } else {
     statusBarItem.hide();
@@ -176,7 +177,100 @@ async function getRepositoryInfo(repoPath: string): Promise<{
   }
 }
 
-async function showReviewPanel(html: string, title: string = 'DevFlow Review Result') {
+// Helper to parse chat input and route to git or AI
+async function handleChatInput(text: string, gitRoot: string | undefined): Promise<string> {
+  const git = gitRoot ? simpleGit(gitRoot) : null;
+  const trimmed = text.trim();
+  try {
+    if (/^\/help$/i.test(trimmed)) {
+      return `Available commands:\nstatus, log, pull, push, commit <msg>, diff, branch, checkout <branch>, create-branch <name>, stash, stash pop, reset, revert <commit>, show <commit>, blame <file> <line>, /help.\nOr ask a question for AI help.`;
+    } else if (git && /^status$/i.test(trimmed)) {
+      const status = await git.status();
+      return `On branch: ${status.current}\nStaged: ${status.staged.length}\nChanged: ${status.files.length}\nConflicted: ${status.conflicted.length}`;
+    } else if (git && /^log$/i.test(trimmed)) {
+      const log = await git.log({ n: 5 });
+      return log.all.map(l => `${l.hash.slice(0,7)}: ${l.message} (${l.author_name})`).join('\n');
+    } else if (git && /^pull$/i.test(trimmed)) {
+      await git.pull();
+      return '✅ Pulled latest changes.';
+    } else if (git && /^push$/i.test(trimmed)) {
+      await git.push();
+      return '✅ Pushed changes.';
+    } else if (git && /^commit (.+)$/i.test(trimmed)) {
+      const m = trimmed.match(/^commit (.+)$/i);
+      if (m) {
+        await git.commit(m[1]);
+        return `✅ Committed: ${m[1]}`;
+      }
+    } else if (git && /^diff$/i.test(trimmed)) {
+      const diff = await git.diff();
+      return diff.length ? diff.slice(0, 2000) : 'No diff.';
+    } else if (git && /^branch$/i.test(trimmed)) {
+      const branches = await git.branch();
+      return `Branches:\n${Object.keys(branches.branches).join(', ')}\nCurrent: ${branches.current}`;
+    } else if (git && /^checkout (.+)$/i.test(trimmed)) {
+      const m = trimmed.match(/^checkout (.+)$/i);
+      if (m) {
+        await git.checkout(m[1]);
+        return `✅ Checked out branch: ${m[1]}`;
+      }
+    } else if (git && /^create-branch (.+)$/i.test(trimmed)) {
+      const m = trimmed.match(/^create-branch (.+)$/i);
+      if (m) {
+        await git.checkoutLocalBranch(m[1]);
+        return `✅ Created and checked out branch: ${m[1]}`;
+      }
+    } else if (git && /^stash$/i.test(trimmed)) {
+      await git.stash();
+      return '✅ Stashed changes.';
+    } else if (git && /^stash pop$/i.test(trimmed)) {
+      await git.stash(['pop']);
+      return '✅ Popped stash.';
+    } else if (git && /^reset$/i.test(trimmed)) {
+      await git.reset();
+      return '✅ Reset complete.';
+    } else if (git && /^revert (.+)$/i.test(trimmed)) {
+      const m = trimmed.match(/^revert (.+)$/i);
+      if (m) {
+        await git.revert(m[1]);
+        return `✅ Reverted commit: ${m[1]}`;
+      }
+    } else if (git && /^show (.+)$/i.test(trimmed)) {
+      const m = trimmed.match(/^show (.+)$/i);
+      if (m) {
+        const out = await git.show([m[1]]);
+        return out.length > 2000 ? out.slice(0, 2000) : out;
+      }
+    } else if (git && /^blame (.+) (\d+)$/i.test(trimmed)) {
+      const m = trimmed.match(/^blame (.+) (\d+)$/i);
+      if (m) {
+        const out = await git.raw(['blame', '-L', `${m[2]},${m[2]}`, m[1]]);
+        return out;
+      }
+    } else if (git) {
+      // If not a recognized git command, treat as AI question
+      const aiRes = await fetch('http://127.0.0.1:5000/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message: trimmed })
+      });
+      if (aiRes.ok) {
+        const data = await aiRes.json() as { ai_response?: string };
+        return data.ai_response || 'AI did not return a response.';
+      } else {
+        return 'AI backend not available.';
+      }
+    } else {
+      return 'No git repository detected.';
+    }
+  } catch (err: any) {
+    return '❌ Error: ' + (err.message || err.toString());
+  }
+  // Default return for type safety
+  return 'Unknown error.';
+}
+
+async function showReviewPanel(html: string, title: string = 'DevFlow Review Result', gitRoot?: string) {
   const panel = vscode.window.createWebviewPanel(
     'devflowResult',
     title,
@@ -187,6 +281,12 @@ async function showReviewPanel(html: string, title: string = 'DevFlow Review Res
     }
   );
   panel.webview.html = html;
+  panel.webview.onDidReceiveMessage(async (msg: any) => {
+    if (msg.type === 'chat') {
+      const response = await handleChatInput(msg.text, gitRoot);
+      panel.webview.postMessage({ type: 'chatResponse', text: response });
+    }
+  });
   return panel;
 }
 
@@ -218,7 +318,7 @@ async function handleGitRepository(gitRoot: string, editor: vscode.TextEditor) {
         break;
       case 'View Changes':
         const diff = await git.diff();
-        await showReviewPanel(`<pre>${diff}</pre>`, 'Repository Changes');
+        await showReviewPanel(`<pre>${diff}</pre>`, 'Repository Changes', gitRoot);
         break;
       case 'Stash & Merge':
         await git.stash();
@@ -244,7 +344,7 @@ async function handleGitRepository(gitRoot: string, editor: vscode.TextEditor) {
   });
 
   const html = await res.text();
-  await showReviewPanel(html);
+  await showReviewPanel(html, 'DevFlow Review Result', gitRoot);
 }
 
 async function handleNonGitRepository() {
@@ -288,35 +388,207 @@ async function handleNonGitRepository() {
   await showReviewPanel(html);
 }
 
+// --- Sidebar Chat Provider ---
+class DevFlowChatProvider implements vscode.WebviewViewProvider {
+  public static readonly viewType = 'devflow.chatView';
+  private _view?: vscode.WebviewView;
+  private _context: vscode.ExtensionContext;
+  private _gitRoot: string | undefined;
+
+  constructor(context: vscode.ExtensionContext) {
+    this._context = context;
+  }
+
+  public async resolveWebviewView(
+    view: vscode.WebviewView,
+    context: vscode.WebviewViewResolveContext,
+    _token: vscode.CancellationToken
+  ) {
+    this._view = view;
+    view.webview.options = { enableScripts: true };
+    view.webview.html = getSidebarWebviewContent();
+    this.setMessageHandler();
+  }
+
+  private setMessageHandler() {
+    if (!this._view) return;
+    this._view.webview.onDidReceiveMessage(async (msg) => {
+      if (msg.type === 'chat') {
+        const response = await this.handleChatInput(msg.text);
+        this._view?.webview.postMessage({ type: 'chatResponse', text: response });
+      } else if (msg.type === 'getContext') {
+        const context = await this.getGitContext();
+        this._view?.webview.postMessage({ type: 'context', ...context });
+      }
+    });
+  }
+
+  // Find the git root for the current workspace
+  private async findGitRoot(): Promise<string | undefined> {
+    const folders = vscode.workspace.workspaceFolders;
+    if (!folders || folders.length === 0) return undefined;
+    let folder = folders[0].uri.fsPath;
+    while (folder !== path.dirname(folder)) {
+      if (fs.existsSync(path.join(folder, '.git'))) return folder;
+      folder = path.dirname(folder);
+    }
+    return undefined;
+  }
+
+  // Get git context for the sidebar (repo, branch, last commit, etc.)
+  private async getGitContext() {
+    if (!this._gitRoot) return { repo: null };
+    const git = simpleGit(this._gitRoot);
+    try {
+      const [log, status, branch, remotes] = await Promise.all([
+        git.log({ n: 1 }),
+        git.status(),
+        git.revparse(['--abbrev-ref', 'HEAD']),
+        git.getRemotes(true)
+      ]);
+      return {
+        repo: path.basename(this._gitRoot),
+        branch,
+        lastCommit: log.latest?.message || '',
+        author: log.latest?.author_name || '',
+        date: log.latest?.date || '',
+        changes: status.files.length,
+        conflicted: status.conflicted.length,
+        remote: remotes.find(r => r.name === 'origin')?.refs.fetch || null
+      };
+    } catch {
+      return { repo: null };
+    }
+  }
+
+  // Handle chat input: route to git or AI
+  private async handleChatInput(text: string): Promise<string> {
+    const git = this._gitRoot ? simpleGit(this._gitRoot) : null;
+    const trimmed = text.trim();
+    try {
+      if (/^\/help$/i.test(trimmed)) {
+        return `Available commands:\nstatus, log, pull, push, commit <msg>, diff, branch, checkout <branch>, create-branch <name>, stash, stash pop, reset, revert <commit>, show <commit>, blame <file> <line>, /help.\nOr ask a question for AI help.`;
+      } else if (git && /^status$/i.test(trimmed)) {
+        const status = await git.status();
+        return `On branch: ${status.current}\nStaged: ${status.staged.length}\nChanged: ${status.files.length}\nConflicted: ${status.conflicted.length}`;
+      } else if (git && /^log$/i.test(trimmed)) {
+        const log = await git.log({ n: 5 });
+        return log.all.map(l => `${l.hash.slice(0,7)}: ${l.message} (${l.author_name})`).join('\n');
+      } else if (git && /^pull$/i.test(trimmed)) {
+        await git.pull();
+        return '✅ Pulled latest changes.';
+      } else if (git && /^push$/i.test(trimmed)) {
+        await git.push();
+        return '✅ Pushed changes.';
+      } else if (git && /^commit (.+)$/i.test(trimmed)) {
+        const m = trimmed.match(/^commit (.+)$/i);
+        if (m) {
+          await git.commit(m[1]);
+          return `✅ Committed: ${m[1]}`;
+        }
+      } else if (git && /^diff$/i.test(trimmed)) {
+        const diff = await git.diff();
+        return diff.length ? diff.slice(0, 2000) : 'No diff.';
+      } else if (git && /^branch$/i.test(trimmed)) {
+        const branches = await git.branch();
+        return `Branches:\n${Object.keys(branches.branches).join(', ')}\nCurrent: ${branches.current}`;
+      } else if (git && /^checkout (.+)$/i.test(trimmed)) {
+        const m = trimmed.match(/^checkout (.+)$/i);
+        if (m) {
+          await git.checkout(m[1]);
+          return `✅ Checked out branch: ${m[1]}`;
+        }
+      } else if (git && /^create-branch (.+)$/i.test(trimmed)) {
+        const m = trimmed.match(/^create-branch (.+)$/i);
+        if (m) {
+          await git.checkoutLocalBranch(m[1]);
+          return `✅ Created and checked out branch: ${m[1]}`;
+        }
+      } else if (git && /^stash$/i.test(trimmed)) {
+        await git.stash();
+        return '✅ Stashed changes.';
+      } else if (git && /^stash pop$/i.test(trimmed)) {
+        await git.stash(['pop']);
+        return '✅ Popped stash.';
+      } else if (git && /^reset$/i.test(trimmed)) {
+        await git.reset();
+        return '✅ Reset complete.';
+      } else if (git && /^revert (.+)$/i.test(trimmed)) {
+        const m = trimmed.match(/^revert (.+)$/i);
+        if (m) {
+          await git.revert(m[1]);
+          return `✅ Reverted commit: ${m[1]}`;
+        }
+      } else if (git && /^show (.+)$/i.test(trimmed)) {
+        const m = trimmed.match(/^show (.+)$/i);
+        if (m) {
+          const out = await git.show([m[1]]);
+          return out.length > 2000 ? out.slice(0, 2000) : out;
+        }
+      } else if (git && /^blame (.+) (\d+)$/i.test(trimmed)) {
+        const m = trimmed.match(/^blame (.+) (\d+)$/i);
+        if (m) {
+          const out = await git.raw(['blame', '-L', `${m[2]},${m[2]}`, m[1]]);
+          return out;
+        }
+      } else if (git) {
+        // If not a recognized git command, treat as AI question
+        const aiRes = await fetch('http://127.0.0.1:5000/chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ message: trimmed })
+        });
+        if (aiRes.ok) {
+          const data = await aiRes.json() as { ai_response?: string };
+          return data.ai_response || 'AI did not return a response.';
+        } else {
+          return 'AI backend not available.';
+        }
+      } else {
+        return 'No git repository detected.';
+      }
+    } catch (err: any) {
+      return '❌ Error: ' + (err.message || err.toString());
+    }
+    return 'Unknown error.';
+  }
+}
+
+// --- Extension Activation ---
 export function activate(context: vscode.ExtensionContext) {
   extensionContext = context;
   
-  // Register the main review command
+  // Register the sidebar chat view
+  context.subscriptions.push(
+    vscode.window.registerWebviewViewProvider(
+      DevFlowChatProvider.viewType,
+      new DevFlowChatProvider(context)
+    )
+  );
+
+  // Register a command to open the sidebar chat
+  context.subscriptions.push(
+    vscode.commands.registerCommand('devflow.openChatSidebar', async () => {
+      await vscode.commands.executeCommand('devflow.chatView.focus');
+    })
+  );
+
+  // Add a status bar item to open the chat sidebar
+  const statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
+  statusBarItem.text = '$(git-branch) DevFlow';
+  statusBarItem.tooltip = 'Open DevFlow AI Chat Sidebar';
+  statusBarItem.command = 'devflow.openChatSidebar';
+  statusBarItem.show();
+  context.subscriptions.push(statusBarItem);
+
+  // Retain the main review command (panel)
   context.subscriptions.push(vscode.commands.registerCommand('extension.devflowReview', async () => {
     const editor = vscode.window.activeTextEditor;
     if (!editor) {
       vscode.window.showErrorMessage("No file is open.");
       return;
     }
-
-    const filePath = editor.document.fileName;
-    const gitRoot = findGitRoot(filePath);
-
-    vscode.window.withProgress({
-      location: vscode.ProgressLocation.Notification,
-      title: "DevFlow AI Reviewing...",
-      cancellable: false
-    }, async () => {
-      try {
-        if (gitRoot) {
-          await handleGitRepository(gitRoot, editor);
-        } else {
-          await handleNonGitRepository();
-        }
-      } catch (err: any) {
-        vscode.window.showErrorMessage(`❌ DevFlow Error: ${err.message}`);
-      }
-    });
+    await showReviewPanel('<h2>DevFlow Review (Panel)</h2><p>Use the sidebar for full chat experience.</p>');
   }));
 
   // Watch for file changes to update git status

@@ -6,10 +6,13 @@ import markdown
 import json
 from datetime import datetime
 from dotenv import load_dotenv
+import subprocess
+from flask_cors import CORS
 
 load_dotenv()
 
 app = Flask(__name__)
+CORS(app)
 
 # In-memory cache for regeneration and versioning
 last_inputs = {}
@@ -112,6 +115,12 @@ def get_azure_openai_client():
         return client
     except Exception as e:
         raise ValueError(f"Failed to initialize Azure OpenAI client: {str(e)}")
+    
+# print("AZURE_OPENAI_API_KEY:", os.environ.get("AZURE_OPENAI_API_KEY"))
+# print("AZURE_OPENAI_ENDPOINT:", os.environ.get("AZURE_OPENAI_ENDPOINT"))
+# print("AZURE_OPENAI_DEPLOYMENT:", os.environ.get("AZURE_OPENAI_DEPLOYMENT"))
+
+REPO_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 
 @app.route("/", methods=["GET", "POST"])
 def index():
@@ -240,6 +249,138 @@ def check_tokens():
         "azure_error": azure_error if not azure_ok else None,
         "github": github_ok
     })
+
+@app.route("/run-command", methods=["POST"])
+def run_command():
+    data = request.json
+    cmd = data.get("command")
+    if not cmd:
+        return jsonify({"error": "No command provided"}), 400
+    try:
+        result = subprocess.run(
+            cmd, shell=True, capture_output=True, text=True, cwd=REPO_DIR
+        )
+        # Log command and output
+        with open(os.path.join(REPO_DIR, "command_log.txt"), "a") as logf:
+            logf.write(f"\n---\nCOMMAND: {cmd}\nSTDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}\nEXIT: {result.returncode}\n")
+        return jsonify({
+            "stdout": result.stdout,
+            "stderr": result.stderr,
+            "exit_code": result.returncode
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/git-action", methods=["POST"])
+def git_action():
+    data = request.json
+    action = data.get("action")
+    args = data.get("args", [])
+    if not action:
+        return jsonify({"error": "No git action provided"}), 400
+    cmd = ["git", action] + args
+    try:
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, cwd=REPO_DIR
+        )
+        # Log git action and output
+        with open(os.path.join(REPO_DIR, "git_action_log.txt"), "a") as logf:
+            logf.write(f"\n---\nGIT ACTION: {' '.join(cmd)}\nSTDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}\nEXIT: {result.returncode}\n")
+        return jsonify({
+            "stdout": result.stdout,
+            "stderr": result.stderr,
+            "exit_code": result.returncode
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/chat", methods=["POST"])
+def chat():
+    data = request.json
+    user_message = data.get("message")
+    if not user_message:
+        return jsonify({"error": "No message provided."}), 400
+
+    # Compose system prompt for AI
+    system_prompt = (
+        "You are a Git and codebase assistant with full access to git and shell commands. "
+        "Given a user message, decide what git or shell command(s) to run, explain your reasoning, "
+        "and provide the command output. If the user asks for a revert, merge, blame, or any git operation, "
+        "run the appropriate command. If the user asks for errors, run tests or show logs. "
+        "Always explain what you did and suggest next actions. "
+        "If a command is dangerous, ask for confirmation. "
+        "Format your response in markdown."
+    )
+
+    # Prepare AI prompt
+    ai_prompt = f"""
+User message:
+{user_message}
+
+---
+
+Instructions:
+- If a git or shell command is needed, specify it in a JSON block like this:
+  ```json
+  {{ "command": "<command to run>" }}
+  ```
+- Then, explain what you are doing and why.
+- After the command output, suggest next actions.
+"""
+
+    try:
+        client = get_azure_openai_client()
+    except ValueError as e:
+        return jsonify({"error": f"Configuration Error: {str(e)}"}), 500
+
+    try:
+        response = client.chat.completions.create(
+            model=os.environ.get("AZURE_OPENAI_DEPLOYMENT"),
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": ai_prompt}
+            ],
+            temperature=0.2,
+            max_tokens=1024
+        )
+        ai_text = response.choices[0].message.content
+
+        # Try to extract command from AI response
+        import re, json as pyjson
+        command = None
+        match = re.search(r'```json\s*({.*?})\s*```', ai_text, re.DOTALL)
+        if match:
+            try:
+                command_json = pyjson.loads(match.group(1))
+                command = command_json.get("command")
+            except Exception:
+                command = None
+
+        command_output = None
+        if command:
+            try:
+                result = subprocess.run(
+                    command, shell=True, capture_output=True, text=True, cwd=REPO_DIR
+                )
+                command_output = {
+                    "stdout": result.stdout,
+                    "stderr": result.stderr,
+                    "exit_code": result.returncode
+                }
+            except Exception as e:
+                command_output = {"error": str(e)}
+
+        # Log chat interaction
+        with open(os.path.join(REPO_DIR, "chat_log.txt"), "a") as logf:
+            logf.write(f"\n---\nUSER: {user_message}\nAI: {ai_text}\nCOMMAND: {command}\nOUTPUT: {command_output}\n")
+
+        return jsonify({
+            "ai_response": ai_text,
+            "command": command,
+            "command_output": command_output
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 if __name__ == "__main__":
     app.run(debug=True)
