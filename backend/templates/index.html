@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>DevFlow AI Review</title>
+  <style>
+    body {
+      font-family: 'Segoe UI', sans-serif;
+      background-color: #0d1117;
+      color: #c9d1d9;
+      padding: 2rem;
+    }
+    input, select, button {
+      padding: 0.6rem;
+      margin: 0.5rem 0;
+      font-size: 1rem;
+    }
+    textarea, pre {
+      width: 100%;
+      background-color: #161b22;
+      color: #c9d1d9;
+      border: 1px solid #30363d;
+      padding: 1rem;
+      margin-top: 1rem;
+    }
+    .loader {
+      display: none;
+      border: 6px solid #f3f3f3;
+      border-top: 6px solid #3498db;
+      border-radius: 50%;
+      width: 40px;
+      height: 40px;
+      animation: spin 1s linear infinite;
+      margin: 1rem auto;
+    }
+    @keyframes spin {
+      0% { transform: rotate(0deg); }
+      100% { transform: rotate(360deg); }
+    }
+    .hidden { display: none; }
+  </style>
+</head>
+<body>
+  <h1>DevFlow AI – Smart PR Reviewer</h1>
+  <form id="review-form" method="POST">
+    <div id="url-input" {% if not show_url_field %}class="hidden"{% endif %}>
+      <input type="text" name="pr_url" placeholder="Enter GitHub PR or Commit URL" style="width: 100%;" />
+    </div>
+    <label>Reviewer Tone:</label>
+    <select name="tone">
+      <option>senior dev</option>
+      <option>beginner</option>
+      <option>product manager</option>
+    </select><br />
+    <label>AI Persona:</label>
+    <select name="persona">
+      <option>strict reviewer</option>
+      <option>mentor</option>
+      <option>fast check</option>
+    </select><br />
+    <button type="submit">Generate Review</button>
+    <button type="button" id="regenerate">🔁 Regenerate</button>
+    <button type="button" id="check-tokens">🔐 Check Tokens</button>
+    <div class="loader" id="loader"></div>
+  </form>
+  <div id="response">{{ response_html|safe }}</div>
+  <script>
+    const form = document.getElementById("review-form");
+    const loader = document.getElementById("loader");
+    const responseDiv = document.getElementById("response");
+
+    form.addEventListener("submit", () => {
+      loader.style.display = "block";
+    });
+
+    document.getElementById("regenerate").onclick = async () => {
+      loader.style.display = "block";
+      const res = await fetch("/regenerate", { method: "POST" });
+      const json = await res.json();
+      loader.style.display = "none";
+      if (json.html) responseDiv.innerHTML = json.html;
+      else responseDiv.innerHTML = `<p style='color:red;'>${json.error}</p>`;
+    };
+
+    document.getElementById("check-tokens").onclick = async () => {
+      const res = await fetch("/token-check");
+      const json = await res.json();
+      alert(`Azure OpenAI Key: ${json.azure_openai ? "✅ OK" : "❌ Missing"}\nGitHub Token: ${json.github ? "✅ OK" : "❌ Missing"}`);
+    };
+  </script>
+</body>
+</html>
